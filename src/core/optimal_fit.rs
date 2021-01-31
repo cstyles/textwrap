@@ -79,6 +79,47 @@ const SHORT_LAST_LINE_PENALTY: i32 = 25;
 /// Penalty for lines ending with a hyphen.
 const HYPHEN_PENALTY: i32 = 25;
 
+/// Compute the cost of the line containing `fragments[i..j]` given a
+/// pre-computed `line_width` and `target_width`. The optimal cost of
+/// breaking fragments[..i] into lines is given by `minimum_cost`.
+fn line_penalty<'a, F: Fragment>(
+    (i, j): (usize, usize),
+    fragments: &'a [F],
+    line_width: usize,
+    target_width: usize,
+    minimum_cost: i32,
+) -> i32 {
+    // Each new line costs NLINE_PENALTY. This prevents creating more
+    // lines than necessary.
+    let mut cost = minimum_cost + NLINE_PENALTY;
+
+    // Next, we add a penalty depending on the line length.
+    if line_width > target_width {
+        // Lines that overflow get a hefty penalty.
+        let overflow = (line_width - target_width) as i32;
+        cost += overflow * OVERFLOW_PENALTY;
+    } else if j < fragments.len() {
+        // Other lines (except for the last line) get a milder penalty
+        // which depend on the size of the gap.
+        let gap = (target_width - line_width) as i32;
+        cost += gap * gap;
+    } else if i + 1 == j && line_width < target_width / SHORT_LINE_FRACTION {
+        // The last line can have any size gap, but we do add a
+        // penalty if the line is very short (typically because it
+        // contains just a single word).
+        cost += SHORT_LAST_LINE_PENALTY;
+    }
+
+    // Finally, we discourage hyphens.
+    if fragments[j - 1].penalty_width() > 0 {
+        // TODO: this should use a penalty value from the fragment
+        // instead.
+        cost += HYPHEN_PENALTY;
+    }
+
+    cost
+}
+
 /// Wrap abstract fragments into lines with an optimal-fit algorithm.
 ///
 /// The `line_widths` map line numbers (starting from 0) to a target
@@ -166,51 +207,27 @@ pub fn wrap_optimal_fit<'a, T: Fragment, F: Fn(usize) -> usize>(
     }
 
     let line_numbers = LineNumbers::new(fragments.len());
+    let minima = smawk::online_column_minima(
+        0,
+        widths.len(),
+        |minima: &[(usize, i32)], i: usize, j: usize| {
+            // Line number for fragment `i`.
+            let line_number = line_numbers.get(i, &minima);
+            let target_width = std::cmp::max(1, line_widths(line_number));
 
-    let minima = smawk::online_column_minima(0, widths.len(), |minima, i, j| {
-        // Line number for fragment `i`.
-        let line_number = line_numbers.get(i, &minima);
-        let target_width = std::cmp::max(1, line_widths(line_number));
+            // Compute the width of a line spanning fragments[i..j] in
+            // constant time. We need to adjust widths[j] by subtracting
+            // the whitespace of fragment[j-i] and then add the penalty.
+            let line_width = widths[j] - widths[i] - fragments[j - 1].whitespace_width()
+                + fragments[j - 1].penalty_width();
 
-        // Compute the width of a line spanning fragments[i..j] in
-        // constant time. We need to adjust widths[j] by subtracting
-        // the whitespace of fragment[j-i] and then add the penalty.
-        let line_width = widths[j] - widths[i] - fragments[j - 1].whitespace_width()
-            + fragments[j - 1].penalty_width();
-
-        // We compute cost of the line containing fragments[i..j]. We
-        // start with values[i].1, which is the optimal cost for
-        // breaking before fragments[i].
-        //
-        // First, every extra line cost NLINE_PENALTY.
-        let mut cost = minima[i].1 + NLINE_PENALTY;
-
-        // Next, we add a penalty depending on the line length.
-        if line_width > target_width {
-            // Lines that overflow get a hefty penalty.
-            let overflow = (line_width - target_width) as i32;
-            cost += overflow * OVERFLOW_PENALTY;
-        } else if j < fragments.len() {
-            // Other lines (except for the last line) get a milder
-            // penalty which depend on the size of the gap.
-            let gap = (target_width - line_width) as i32;
-            cost += gap * gap;
-        } else if i + 1 == j && line_width < target_width / SHORT_LINE_FRACTION {
-            // The last line can have any size gap, but we do add a
-            // penalty if the line is very short (typically because it
-            // contains just a single word).
-            cost += SHORT_LAST_LINE_PENALTY;
-        }
-
-        // Finally, we discourage hyphens.
-        if fragments[j - 1].penalty_width() > 0 {
-            // TODO: this should use a penalty value from the fragment
-            // instead.
-            cost += HYPHEN_PENALTY;
-        }
-
-        cost
-    });
+            // The line containing fragments[i..j]. We start with
+            // minima[i].1, which is the optimal cost for breaking
+            // before fragments[i].
+            let minimum_cost = minima[i].1;
+            line_penalty((i, j), fragments, line_width, target_width, minimum_cost)
+        },
+    );
 
     let mut lines = Vec::with_capacity(line_numbers.get(fragments.len(), &minima));
     let mut pos = fragments.len();
