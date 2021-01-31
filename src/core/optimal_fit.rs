@@ -29,55 +29,23 @@ impl LineNumbers {
 
 /// Per-line penalty. This is added for every line, which makes it
 /// expensive to output more lines than the minimum required.
-const NLINE_PENALTY: i32 = 1000;
+const NLINE_PENALTY: f64 = 1000.0;
+
+/// Penalty given to a line with the maximum possible gap, i.e., a
+/// line with a width of zero.
+const MAX_LINE_PENALTY: f64 = 10000.0;
 
 /// Per-character cost for lines that overflow the target line width.
-///
-/// With a value of 50², every single character costs as much as
-/// leaving a gap of 50 characters behind. This is becuase we assign
-/// as cost of `gap * gap` to a short line. This means that we can
-/// overflow the line by 1 character in extreme cases:
-///
-/// ```
-/// use textwrap::core::{wrap_optimal_fit, Word};
-///
-/// let short = "foo ";
-/// let long = "x".repeat(50);
-/// let fragments = vec![Word::from(short), Word::from(&long)];
-///
-/// // Perfect fit, both words are on a single line with no overflow.
-/// let wrapped = wrap_optimal_fit(&fragments, |_| short.len() + long.len());
-/// assert_eq!(wrapped, vec![&[Word::from(short), Word::from(&long)]]);
-///
-/// // The words no longer fit, yet we get a single line back. While
-/// // the cost of overflow (`1 * 2500`) is the same as the cost of the
-/// // gap (`50 * 50 = 2500`), the tie is broken by `NLINE_PENALTY`
-/// // which makes it cheaper to overflow than to use two lines.
-/// let wrapped = wrap_optimal_fit(&fragments, |_| short.len() + long.len() - 1);
-/// assert_eq!(wrapped, vec![&[Word::from(short), Word::from(&long)]]);
-///
-/// // The cost of overflow would be 2 * 2500, whereas the cost of the
-/// // gap is only `49 * 49 + NLINE_PENALTY = 2401 + 1000 = 3401`. We
-/// // therefore get two lines.
-/// let wrapped = wrap_optimal_fit(&fragments, |_| short.len() + long.len() - 2);
-/// assert_eq!(wrapped, vec![&[Word::from(short)],
-///                          &[Word::from(&long)]]);
-/// ```
-///
-/// This only happens if the overflowing word is 50 characters long
-/// _and_ if it happens to overflow the line by exactly one character.
-/// If it overflows by more than one character, the overflow penalty
-/// will quickly outgrow the cost of the gap, as seen above.
-const OVERFLOW_PENALTY: i32 = 50 * 50;
+const OVERFLOW_PENALTY: f64 = 2.0 * MAX_LINE_PENALTY;
 
 /// The last line is short if it is less than 1/4 of the target width.
 const SHORT_LINE_FRACTION: usize = 4;
 
 /// Penalize a short last line.
-const SHORT_LAST_LINE_PENALTY: i32 = 25;
+const SHORT_LAST_LINE_PENALTY: f64 = 125.0;
 
 /// Penalty for lines ending with a hyphen.
-const HYPHEN_PENALTY: i32 = 25;
+const HYPHEN_PENALTY: f64 = 150.0;
 
 /// Compute the cost of the line containing `fragments[i..j]` given a
 /// pre-computed `line_width` and `target_width`. The optimal cost of
@@ -87,8 +55,8 @@ fn line_penalty<'a, F: Fragment>(
     fragments: &'a [F],
     line_width: usize,
     target_width: usize,
-    minimum_cost: i32,
-) -> i32 {
+    minimum_cost: f64,
+) -> f64 {
     // Each new line costs NLINE_PENALTY. This prevents creating more
     // lines than necessary.
     let mut cost = minimum_cost + NLINE_PENALTY;
@@ -96,13 +64,13 @@ fn line_penalty<'a, F: Fragment>(
     // Next, we add a penalty depending on the line length.
     if line_width > target_width {
         // Lines that overflow get a hefty penalty.
-        let overflow = (line_width - target_width) as i32;
-        cost += overflow * OVERFLOW_PENALTY;
+        let overflow = line_width - target_width;
+        cost += overflow as f64 * OVERFLOW_PENALTY;
     } else if j < fragments.len() {
         // Other lines (except for the last line) get a milder penalty
-        // which depend on the size of the gap.
-        let gap = (target_width - line_width) as i32;
-        cost += gap * gap;
+        // which increases quadratically from 0 to MAX_LINE_PENALTY.
+        let gap = (target_width - line_width) as f64 / target_width as f64;
+        cost += gap * gap * MAX_LINE_PENALTY;
     } else if i + 1 == j && line_width < target_width / SHORT_LINE_FRACTION {
         // The last line can have any size gap, but we do add a
         // penalty if the line is very short (typically because it
@@ -208,9 +176,9 @@ pub fn wrap_optimal_fit<'a, T: Fragment, F: Fn(usize) -> usize>(
 
     let line_numbers = LineNumbers::new(fragments.len());
     let minima = smawk::online_column_minima(
-        0,
+        0.0,
         widths.len(),
-        |minima: &[(usize, i32)], i: usize, j: usize| {
+        |minima: &[(usize, f64)], i: usize, j: usize| {
             // Line number for fragment `i`.
             let line_number = line_numbers.get(i, &minima);
             let target_width = std::cmp::max(1, line_widths(line_number));
